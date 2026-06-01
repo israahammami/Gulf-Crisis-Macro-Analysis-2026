@@ -1,0 +1,263 @@
+# =====================
+# R Code for the Project
+# =====================
+#This R code provides a step-by-step framework for students to import data, estimate the models, 
+#and interpret the results. It assumes the data has been collected and saved as a CSV file.
+
+# ============================================================================
+# Project: Geopolitics, Oil Shock, and Macroeconomics - Panel Data Analysis
+# ============================================================================
+
+# 1. INSTALL AND LOAD LIBRARIES
+# Install packages if you don't have them
+# install.packages(c("tidyverse", "plm", "lmtest", "stargazer", "ggplot2", "car"))
+
+library(tidyverse)   # For data manipulation and plotting
+library(plm)         # For panel data econometrics
+library(lmtest)      # For robust standard errors and tests
+library(stargazer)   # For creating nice regression tables
+library(ggplot2)     # For advanced plotting
+library(car)         # For hypothesis tests like linearHypothesis
+
+# ============================================================================
+# 2. LOAD AND PREPARE THE DATA
+# ============================================================================
+
+# Load the dataset (replace 'your_data.csv' with the actual file path)
+# The dataset should be in 'long' format with columns: country, date, cpi, ipi, brent, neer, policy_rate, vix
+# Load the raw data
+data_raw <- read.csv("Project Econm.csv", stringsAsFactors = FALSE)
+
+# Inspect the data structure
+str(data_raw)
+head(data_raw)
+
+# Convert date column to Date format
+data_raw$date <- as.Date(data_raw$date)
+
+# Create the natural log of dependent variables
+data_processed <- data_raw %>%
+  mutate(
+    ln_cpi = log(cpi),
+    ln_ipi = log(ipi),
+    ln_neer = log(neer),
+    # Create a dummy variable for the "post-crisis" period (starting March 2026)
+    post_crisis = ifelse(date >= as.Date("2026-03-01"), 1, 0),
+    # Calculate the monthly percentage change in oil price (the shock)
+    oil_pct_change = (brent - lag(brent)) / lag(brent) * 100
+  ) %>%
+  # Group by country to calculate the lagged oil price change correctly
+  group_by(country) %>%
+  mutate(oil_pct_change = ifelse(is.na(oil_pct_change), 0, oil_pct_change)) %>%
+  ungroup() %>%
+  # Filter out any incomplete rows if necessary
+  filter(!is.na(ln_cpi), !is.na(ln_ipi), !is.na(oil_pct_change))
+
+
+# ============================================================================
+# 3. EXPLORATORY DATA ANALYSIS (EDA)
+# ============================================================================
+
+library(ggplot2)
+library(dplyr)
+
+# 1. Create a plain dataframe for plotting
+plot_data <- as.data.frame(data_processed)
+
+# 2. Ensure Date and Group are correctly formatted
+plot_data$date <- as.Date(plot_data$date)
+plot_data$group <- as.factor(plot_data$group)
+
+# 3. Plotting Oil Prices
+ggplot(plot_data, aes(x = date, y = brent)) +
+  geom_line(color = "darkred", linewidth = 1) +
+  geom_vline(xintercept = as.Date("2026-03-01"), linetype = "dashed", color = "blue") +
+  annotate("text", x = as.Date("2026-03-01"), y = max(plot_data$brent, na.rm = TRUE), 
+           label = "Crisis Start", hjust = -0.1) +
+  labs(title = "Brent Crude Oil Price: Pre and Post 2026 Gulf Crisis",
+       x = "Date", y = "USD per Barrel") +
+  theme_minimal()
+
+# 4. Plotting CPI Trends
+ggplot(plot_data, aes(x = date, y = ln_cpi, color = group)) +
+  stat_summary(fun = mean, geom = "line", linewidth = 1) +
+  geom_vline(xintercept = as.Date("2026-03-01"), linetype = "dashed") +
+  labs(title = "Log CPI Trends by Country Group",
+       x = "Date", y = "Log(CPI)") +
+  theme_minimal()
+
+
+# ============================================================================
+# 4. PANEL DATA REGRESSION ANALYSIS
+# ============================================================================
+
+# First, declare the data as a panel data frame
+# Use 'country' as the individual index and 'date' as the time index
+pdata <- pdata.frame(data_processed, index = c("country", "date"))
+
+# ----------------------------------------------------------------------------
+# Model 1: Pooled OLS (POLS)
+# This model ignores the panel structure.
+# Equation: ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis
+# ----------------------------------------------------------------------------
+
+pols_model <- plm(ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis,
+                  data = pdata, 
+                  model = "pooling")
+
+# ----------------------------------------------------------------------------
+# Model 2: Fixed Effects (FE) Model
+# This model allows each country to have its own intercept, controlling for time-invariant unobserved heterogeneity.
+# Equation: ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis + country-specific intercepts
+# ----------------------------------------------------------------------------
+fe_model <- plm(ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis,
+                data = pdata,
+                model = "within")  # 'within' is the argument for Fixed Effects
+# ----------------------------------------------------------------------------
+# Model 3: Random Effects (RE) Model
+# This model assumes that country-specific effects are random and uncorrelated with the regressors.
+# Equation: ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis
+# ----------------------------------------------------------------------------
+# 3. Random Effects (RE) - Using 'amemiya' to bypass the small-sample convergence issue
+re_model <- plm(ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis,
+                data = pdata, model = "random", random.method = "amemiya")
+# ============================================================================
+# 5. DIAGNOSTIC TESTS AND ROBUST STANDARD ERRORS
+# ============================================================================
+
+# 1. Hausman Test: To choose between Fixed Effects and Random Effects
+# Null Hypothesis (H0): RE is consistent and efficient. FE is consistent.
+# Alternative (H1): RE is inconsistent. FE is consistent.
+hausman_test <- phtest(fe_model, re_model)
+print(hausman_test)
+# If p-value < 0.05, reject H0. The FE model is preferred.
+
+# Run this to prove your model is scientifically valid
+lm_test <- plmtest(ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis, 
+                   data = pdata, 
+                   type = "bp")
+print(lm_test)
+
+# 2. Breusch-Pagan Test for Random Effects: To test if Pooled OLS is sufficient vs. RE.
+# Null Hypothesis: Pooled OLS is sufficient (no random effects).
+bp_test <- plmtest(pols_model, effect = "individual", type = "bp")
+print(bp_test)
+# If p-value < 0.05, reject H0. RE model is better than POLS.
+
+# 3. Robust Standard Errors
+# We will use robust standard errors to correct for heteroskedasticity and autocorrelation.
+# Use 'vcovHC' for heteroskedasticity-consistent (HC) and 'vcovSCC' for double-clustered (time and country) standard errors.
+
+# 1. Load the library that contains 'coeftest'
+library(lmtest)
+
+# 2. Run the robust standard error test
+# We use 'HC3' as it is a conservative, high-quality standard error estimator
+coeftest(fe_model, vcov = vcovHC(fe_model, method = "arellano", type = "HC3"))
+# For Fixed Effects:
+coeftest(fe_model, vcov = vcovHC(fe_model, method = "arellano", type = "HC3"))  # Arellano (1987) robust SE
+# For Random Effects:
+coeftest(re_model, vcov = vcovHC(re_model, method = "arellano", type = "HC3"))
+# For Pooled OLS:
+coeftest(pols_model, vcov = vcovHC(pols_model, type = "HC3"))
+
+# Try running RE with the 'amemiya' method
+re_model_robust <- plm(ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis,
+                       data = pdata,
+                       model = "random",
+                       random.method = "amemiya") # Trying a different estimator
+
+# Check if it worked
+summary(re_model_robust)
+
+
+# ============================================================================
+# 6. HETEROGENEITY ANALYSIS: OIL-IMPORTERS VS. EXPORTERS
+# ============================================================================
+
+# Create a subset for oil importers (e.g., based on a column 'oil_balance' = 'importer')
+importers_data <- pdata %>% filter(oil_balance == "importer")
+exporters_data <- pdata %>% filter(oil_balance == "exporter")
+
+# Run FE models for each subgroup
+fe_importers <- plm(ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis,
+                    data = importers_data, model = "within")
+fe_exporters <- plm(ln_cpi ~ oil_pct_change + ln_neer + policy_rate + vix + post_crisis,
+                    data = exporters_data, model = "within")
+
+# Display the results side-by-side
+stargazer(fe_importers, fe_exporters,
+          title = "Fixed Effects Results: Oil Importers vs. Exporters",
+          column.labels = c("Importers", "Exporters"),
+          type = "text",
+          keep.stat = c("n", "rsq"))
+
+
+# --- VISUALIZATION: Coefficient Plot ---
+# This helps visualize the importance of each variable
+library(ggplot2)
+library(broom)
+
+# Get the coefficients from your preferred FE model
+model_df <- tidy(fe_model)
+
+# Plot the coefficients with their confidence intervals
+ggplot(model_df, aes(x = term, y = estimate)) +
+  geom_point(size = 3, color = "darkblue") +
+  geom_errorbar(aes(ymin = estimate - 1.96*std.error, 
+                    ymax = estimate + 1.96*std.error), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Fixed Effects Coefficients: Impact on CPI",
+       x = "Variables", y = "Estimate")
+#================================================================
+library(stargazer)
+# This generates a summary table of all your models
+stargazer(pols_model, fe_model, re_model_robust, 
+          title = "Comparison of Panel Data Models",
+          type = "text",
+          column.labels = c("Pooled OLS", "Fixed Effects", "Random Effects"),
+          keep.stat = c("n", "rsq", "adj.rsq", "f"))
+#===============================================================
+
+library(ggplot2)
+library(broom)
+
+# 1. Clean up the model data
+# We convert the term into a factor so ggplot treats it as a label
+model_df <- tidy(fe_model) %>%
+  mutate(term = as.factor(term))
+
+# 2. Plot with correct mapping
+ggplot(model_df, aes(x = term, y = estimate)) +
+  geom_point(size = 3, color = "darkblue") +
+  geom_errorbar(aes(ymin = estimate - 1.96*std.error, 
+                    ymax = estimate + 1.96*std.error), width = 0.2) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  # Use coord_flip() to make the labels horizontal and readable
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "Fixed Effects Coefficients: Impact on CPI",
+       subtitle = "Variables crossing the red line are statistically insignificant",
+       x = "Variables", y = "Estimate")
+
+
+# Plot average Log CPI trends by Oil Balance Group
+library(ggplot2)
+library(dplyr)
+
+# Ensure the data is prepared correctly for the plot
+plot_data <- data_processed %>%
+  mutate(date = as.Date(date)) # Ensure date is explicitly a Date class
+
+# Use this plot code
+ggplot(plot_data, aes(x = date, y = ln_cpi, color = oil_balance)) +
+  # We use group = oil_balance to ensure the lines are drawn correctly
+  stat_summary(aes(group = oil_balance), fun = mean, geom = "line", linewidth = 1.2) +
+  geom_vline(xintercept = as.Date("2026-03-01"), linetype = "dashed", color = "black") +
+  labs(title = "Comparison of CPI Trends: Importers vs Exporters",
+       subtitle = "Notice the divergence after the March 2026 Crisis",
+       x = "Date", y = "Average Log(CPI)",
+       color = "Economy Type") +
+  theme_minimal()
